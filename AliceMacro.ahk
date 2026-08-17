@@ -131,14 +131,14 @@ RButton:: {
 }
 #HotIf
 
-^1::Quit()
+^1:: Quit()
 
 Settings.Load()
 
 myGui := Gui(, "爱丽丝连点器")
-myGui.Add("Text",, "按下时间(ms)")
+myGui.Add("Text", , "按下时间(ms)")
 myGui.Add("Edit", " w360", String(Settings.down)).OnEvent("Change", ChangeOnDownTime)
-myGui.Add("Text",, "抬起时间(ms)")
+myGui.Add("Text", , "抬起时间(ms)")
 myGui.Add("Edit", " w360", String(Settings.up)).OnEvent("Change", ChangeOnUpTime)
 standbyBtn := myGui.Add("Button", "Default w80 XP+100 YP+40", "开始待机")
 standbyBtn.OnEvent("Click", ClickOnStandby)
