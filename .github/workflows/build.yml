@@ -1,0 +1,96 @@
+# 每次 push 编译（语法门禁）；v* tag push 时生成 SHA256 并自动发布 release。
+name: Build
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write  # tag push 时 softprops/action-gh-release 需要
+
+    env:
+      # 官方工具链，显式锁定版本（升级需人工确认）
+      AHK_TAG: v2.0.26
+      AHK_ZIP: AutoHotkey_2.0.26.zip
+      AHK2EXE_TAG: Ahk2Exe1.1.37.02a2
+      AHK2EXE_ZIP: Ahk2Exe1.1.37.02a2.zip
+      OUT_EXE: AliceMacro.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download AutoHotkey v2 + Ahk2Exe (pinned)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path tools | Out-Null
+
+          $ahkUrl = "https://github.com/AutoHotkey/AutoHotkey/releases/download/$env:AHK_TAG/$env:AHK_ZIP"
+          $a2xUrl = "https://github.com/AutoHotkey/Ahk2Exe/releases/download/$env:AHK2EXE_TAG/$env:AHK2EXE_ZIP"
+
+          Invoke-WebRequest -Uri $ahkUrl -OutFile "tools\$env:AHK_ZIP"
+          Invoke-WebRequest -Uri $a2xUrl -OutFile "tools\$env:AHK2EXE_ZIP"
+
+          Expand-Archive "tools\$env:AHK_ZIP" -DestinationPath tools\AutoHotkey -Force
+          Expand-Archive "tools\$env:AHK2EXE_ZIP" -DestinationPath tools\Compiler -Force
+
+          # zip 根目录布局可能有差异，统一按文件名定位
+          $base = Get-ChildItem -Path tools\AutoHotkey -Recurse -Filter AutoHotkey64.exe | Select-Object -First 1
+          $compiler = Get-ChildItem -Path tools\Compiler -Recurse -Filter Ahk2Exe.exe | Select-Object -First 1
+          if (-not $base) { throw 'AutoHotkey64.exe not found after extract' }
+          if (-not $compiler) { throw 'Ahk2Exe.exe not found after extract' }
+
+          "AHK_BASE=$($base.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "AHK2EXE=$($compiler.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "Base: $($base.FullName)"
+          Write-Host "Compiler: $($compiler.FullName)"
+
+      - name: Compile (syntax gate)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (Test-Path $env:OUT_EXE) { Remove-Item $env:OUT_EXE -Force }
+
+          # /compress 0  → 不压缩（UPX/MPRESS 不在 runner 上，且压缩易触发误报）
+          # /silent verbose → 无 GUI 弹窗，错误走 stderr
+          & $env:AHK2EXE `
+            /in "AliceMacro.ahk" `
+            /out "$env:OUT_EXE" `
+            /icon "Alice.ico" `
+            /base "$env:AHK_BASE" `
+            /compress 0 `
+            /silent verbose
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Ahk2Exe failed with exit code $LASTEXITCODE (see Ahk2Exe ErrorCodes.md)"
+          }
+          if (-not (Test-Path $env:OUT_EXE) -or (Get-Item $env:OUT_EXE).Length -lt 1KB) {
+            throw "Compile reported success but $env:OUT_EXE missing or too small"
+          }
+          Write-Host "Compiled OK: $((Get-Item $env:OUT_EXE).FullName) ($((Get-Item $env:OUT_EXE).Length) bytes)"
+
+      - name: SHA256 checksum
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          sha256sum "$OUT_EXE" | tee "${OUT_EXE}.sha256"
+          cat "${OUT_EXE}.sha256"
+
+      - name: GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            AliceMacro.exe
+            AliceMacro.exe.sha256
+          fail_on_unmatched_files: true
+          generate_release_notes: true
