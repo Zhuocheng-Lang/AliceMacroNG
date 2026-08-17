@@ -13,6 +13,7 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    timeout-minutes: 15  # 兜底：任何挂起最长烧 15 分钟
     permissions:
       contents: write  # tag push 时 softprops/action-gh-release 需要
 
@@ -26,7 +27,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Download AutoHotkey v2 + Ahk2Exe (pinned)
         shell: pwsh
@@ -60,23 +61,45 @@ jobs:
           $ErrorActionPreference = 'Stop'
           if (Test-Path $env:OUT_EXE) { Remove-Item $env:OUT_EXE -Force }
 
+          # Ahk2Exe 是 GUI 子系统程序：pwsh 的 & 调用不会等待，必须 Start-Process 显式等待
           # /compress 0  → 不压缩（UPX/MPRESS 不在 runner 上，且压缩易触发误报）
-          # /silent verbose → 无 GUI 弹窗，错误走 stderr
-          & $env:AHK2EXE `
-            /in "AliceMacro.ahk" `
-            /out "$env:OUT_EXE" `
-            /icon "Alice.ico" `
-            /base "$env:AHK_BASE" `
-            /compress 0 `
-            /silent verbose
+          # /silent verbose → 无 GUI 弹窗，错误走 stderr/stdout
+          $argLine = '/in "AliceMacro.ahk" /out "{0}" /icon "Alice.ico" /base "{1}" /compress 0 /silent verbose' -f $env:OUT_EXE, $env:AHK_BASE
+          Write-Host "Compiler: $env:AHK2EXE (exists: $(Test-Path $env:AHK2EXE))"
+          Write-Host "Base:     $env:AHK_BASE (exists: $(Test-Path $env:AHK_BASE))"
+          Write-Host "Icon:     Alice.ico (exists: $(Test-Path Alice.ico))"
+          Write-Host "Args:     $argLine"
 
-          if ($LASTEXITCODE -ne 0) {
-            throw "Ahk2Exe failed with exit code $LASTEXITCODE (see Ahk2Exe ErrorCodes.md)"
+          $stdOut = Join-Path $env:RUNNER_TEMP 'ahk2exe.stdout.txt'
+          $stdErr = Join-Path $env:RUNNER_TEMP 'ahk2exe.stderr.txt'
+          # 注意：不用 Start-Process -Wait —— 它会连带等待所有后代进程，
+          # Ahk2Exe 的 /iLib 校验子进程若因 #Warn 弹窗等原因未退出就会死等
+          # （实测：脚本引用不存在的函数名时校验器弹模态警告框，headless 上死等）。
+          # 改为只等本进程 + 显式超时，超时杀进程并回传诊断。
+          $proc = Start-Process -FilePath $env:AHK2EXE -ArgumentList $argLine -PassThru -NoNewWindow `
+            -RedirectStandardOutput $stdOut -RedirectStandardError $stdErr
+          if (-not $proc.WaitForExit(180000)) {
+            try { $proc.Kill() } catch {}
+            $tout = Get-Content $stdOut -Raw -ErrorAction SilentlyContinue
+            $terr = Get-Content $stdErr -Raw -ErrorAction SilentlyContinue
+            $tdiag = "TIMEOUT 180s; stdout=$tout; stderr=$terr" -replace '%','%25' -replace "`r",'%0D' -replace "`n",'%0A'
+            Write-Host "::error file=AliceMacro.ahk,title=Ahk2Exe hang::$tdiag"
+            exit 1
           }
-          if (-not (Test-Path $env:OUT_EXE) -or (Get-Item $env:OUT_EXE).Length -lt 1KB) {
-            throw "Compile reported success but $env:OUT_EXE missing or too small"
+          $code = $proc.ExitCode
+          $out = Get-Content $stdOut -Raw -ErrorAction SilentlyContinue
+          $err = Get-Content $stdErr -Raw -ErrorAction SilentlyContinue
+          Write-Host "ExitCode: $code"
+          Write-Host "--- stdout ---"; Write-Host $out
+          Write-Host "--- stderr ---"; Write-Host $err
+
+          if ($code -ne 0 -or -not (Test-Path $env:OUT_EXE) -or (Get-Item $env:OUT_EXE).Length -lt 1KB) {
+            # 注解通道：诊断信息写入 check-run annotation（无需 token 即可经 API 读取）
+            $diag = "exit=$code; stdout=$out; stderr=$err" -replace '%','%25' -replace "`r",'%0D' -replace "`n",'%0A'
+            Write-Host "::error file=AliceMacro.ahk,title=Ahk2Exe compile failed::$diag"
+            exit 1
           }
-          Write-Host "Compiled OK: $((Get-Item $env:OUT_EXE).FullName) ($((Get-Item $env:OUT_EXE).Length) bytes)"
+          Write-Host "Compiled OK: $((Get-Item $env:OUT_EXE).Length) bytes"
 
       - name: SHA256 checksum
         if: startsWith(github.ref, 'refs/tags/v')

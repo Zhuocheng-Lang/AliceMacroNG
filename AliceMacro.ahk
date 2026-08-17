@@ -18,7 +18,8 @@ class Settings {
 
     static ReadInt(key, def) {
         try return Integer(IniRead(this.file, "click", key, def))
-        catch return def
+        catch
+            return def   ; 文件缺失/节缺失/脏值 → 一律回落默认
     }
 
     static Load() {
@@ -61,10 +62,10 @@ StopClick() {
 UpdateUI() {
     if App.armed {
         standbyBtn.Text := "停止待机"
-        TraySetTip("已开始待机，长按右键即可连点")
+        A_IconTip := "已开始待机，长按右键即可连点"
     } else {
         standbyBtn.Text := "开始待机"
-        TraySetTip("爱丽丝连点器：未待机")
+        A_IconTip := "爱丽丝连点器：未待机"
     }
 }
 
